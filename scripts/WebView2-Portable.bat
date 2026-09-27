@@ -4,7 +4,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (${%~f0} | out-strin
 exit /b
 : end batch / begin powershell #>
 
-$scriptver = '26.09.2026'
+$scriptver = '27.09.2026'
 $ProgressPreference = 'SilentlyContinue'
 $host.ui.RawUI.WindowTitle = 'WebView2 Runtime Portable ' + $scriptver
 
@@ -126,24 +126,33 @@ function Get-WindowsVersionInfo {
     $os         = Get-CimInstance -ClassName Win32_OperatingSystem
     $buildNum   = [int]$os.BuildNumber
     $majorVer   = [int]$os.Version.Split('.')[0]
+    $minorVer   = [int]$os.Version.Split('.')[1]
     $caption    = $os.Caption
 
     # Windows version detection by build number
     # Windows 10 builds : 10240 (1507) - 19045 (22H2)
     # Windows 11 builds : 22000+
     # Windows 8.1       : 9600
+    # Windows 8         : 9200
     # Windows 7         : 7601
 
     $isWin10 = ($majorVer -eq 10 -and $buildNum -ge 10240 -and $buildNum -le 19045)
     $isWin11 = ($majorVer -eq 10 -and $buildNum -ge 22000)
+    $isWin81 = ($majorVer -eq 6 -and $minorVer -eq 3)
+    $isWin8  = ($majorVer -eq 6 -and $minorVer -eq 2)
+    $isWin7  = ($majorVer -eq 6 -and $minorVer -eq 1)
     $isBelowWin10 = ($majorVer -lt 10) -or ($majorVer -eq 10 -and $buildNum -lt 10240)
 
     return @{
         Caption      = $caption
         BuildNumber  = $buildNum
         MajorVersion = $majorVer
+        MinorVersion = $minorVer
         IsWin10      = $isWin10
         IsWin11      = $isWin11
+        IsWin81      = $isWin81
+        IsWin8       = $isWin8
+        IsWin7       = $isWin7
         IsBelowWin10 = $isBelowWin10
     }
 }
@@ -701,7 +710,9 @@ $winVer = Get-WindowsVersionInfo
 
 $winVerLabel = if     ($winVer.IsWin11)      { "Windows 11" }
                elseif ($winVer.IsWin10)      { "Windows 10" }
-               elseif ($winVer.IsBelowWin10) { "Below Windows 10" }
+               elseif ($winVer.IsWin81)      { "Windows 8.1" }
+               elseif ($winVer.IsWin8)       { "Windows 8" }
+               elseif ($winVer.IsWin7)       { "Windows 7" }
                else                          { "Unknown"    }
 
 # ---------------------------------------------------------------
@@ -732,37 +743,55 @@ Write-Host ""
 
 try {
     # ---------------------------------------------------------------
-    # Fetch download page
+    # Fetch WebView2 versions from Microsoft API
     # ---------------------------------------------------------------
     Write-Section "Fetching WebView2 Download Info"
-    Write-Status "Status" "Contacting Microsoft..." "Yellow"
-    $html = (Invoke-WebRequest -Uri "https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section" -UseBasicParsing).Content
+    Write-Status "Status" "Contacting Microsoft API..." "Yellow"
 
-    $pattern = 'https:\\u002F\\u002Fmsedge\.sf\.dl\.delivery\.mp\.microsoft\.com\\u002Ffilestreamingservice\\u002Ffiles\\u002F[a-z0-9\-]+\\u002FMicrosoft\.WebView2\.FixedVersionRuntime\.(\d+\.\d+\.\d+\.\d+)\.(x86|x64|arm64)\.cab'
-    $matches = [regex]::Matches($html, $pattern)
+    # For Windows 8.1 and below, use fixed version from GitHub
+    if ($winVer.IsWin81 -or $winVer.IsWin8 -or $winVer.IsWin7) {
+        Write-Status "Detected OS" "$winVerLabel - Using legacy version 109.0.1518.78" "Yellow"
+        
+        $ver = "109.0.1518.78"
+        $cabUrl = "https://github.com/westinyang/WebView2RuntimeArchive/releases/download/109.0.1518.78/Microsoft.WebView2.FixedVersionRuntime.109.0.1518.78.$arch.cab"
+        
+        Write-Status "Legacy Version" $ver "Yellow"
+        Write-Status "Source" "GitHub Archive" "DarkGray"
+    } else {
+        # Modern Windows - fetch from Microsoft API
+        try {
+            $json = Invoke-WebRequest -Uri "https://developer.microsoft.com/microsoft-edge/api/webview2" -UseBasicParsing | ConvertFrom-Json
+            
+            if ($json.Count -eq 0) {
+                Write-Status "Error" "No versions found in API response" "Red"
+                pause
+                exit 1
+            }
 
-    if ($matches.Count -eq 0) {
-        Write-Status "Error" "No download URLs found" "Red"
-        pause
-        exit 1
-    }
+            # Get latest version
+            $latestVersion = $json[0]
+            $ver = $latestVersion.version
+            Write-Status "Latest Version" $ver "Green"
 
-    $versions = $matches | ForEach-Object { $_.Groups[1].Value } | Sort-Object { [version]$_ } -Descending -Unique
-    $ver = $versions[0]
-    Write-Status "Latest Version" $ver "Green"
+            # Find the correct architecture URL
+            $cabUrl = $null
+            foreach ($build in $latestVersion.builds) {
+                if ($build.architecture -eq $arch) {
+                    $cabUrl = $build.url
+                    break
+                }
+            }
 
-    $cabUrl = $null
-    foreach ($m in $matches) {
-        if ($m.Groups[1].Value -eq $ver -and $m.Groups[2].Value -eq $arch) {
-            $cabUrl = $m.Value.Replace('\u002F', '/')
-            break
+            if (-not $cabUrl) {
+                Write-Status "Error" "No download URL found for $arch architecture" "Red"
+                pause
+                exit 1
+            }
+        } catch {
+            Write-Status "Error" "Failed to fetch API: $($_.Exception.Message)" "Red"
+            pause
+            exit 1
         }
-    }
-
-    if (-not $cabUrl) {
-        Write-Status "Error" "No URL found for $ver ($arch)" "Red"
-        pause
-        exit 1
     }
 
     Write-Status "Download URL" $cabUrl "DarkGray"
@@ -776,9 +805,15 @@ try {
     $cab = Join-Path $dlpath "Microsoft.WebView2.FixedVersionRuntime.$ver.$arch.cab"
     Write-Status "File" ([IO.Path]::GetFileName($cab)) "Yellow"
 
-    Invoke-WebRequest -Uri $cabUrl -OutFile $cab
-    Write-Status "Download" "Completed" "Green"
-    Write-Status "Size" ("{0:N2} MB" -f ((Get-Item $cab).Length / 1MB)) "Cyan"
+    try {
+        Invoke-WebRequest -Uri $cabUrl -OutFile $cab -ErrorAction Stop
+        Write-Status "Download" "Completed" "Green"
+        Write-Status "Size" ("{0:N2} MB" -f ((Get-Item $cab).Length / 1MB)) "Cyan"
+    } catch {
+        Write-Status "Error" "Download failed: $($_.Exception.Message)" "Red"
+        pause
+        exit 1
+    }
 
     # ---------------------------------------------------------------
     # Stop WebView2 processes before extraction
