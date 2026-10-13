@@ -4,7 +4,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (${%~f0} | out-strin
 exit /b
 : end batch / begin powershell #>
 
-$scriptver = '27.09.2026'
+$scriptver = '13.10.2026'
 $ProgressPreference = 'SilentlyContinue'
 $host.ui.RawUI.WindowTitle = 'WebView2 Runtime Portable ' + $scriptver
 
@@ -904,6 +904,505 @@ try {
     # ---------------------------------------------------------------
     Set-EnvVar -Mode $envVarMode -TargetPath $configPath
 
+    # ---------------------------------------------------------------
+    # Create Remove.bat in the installation folder
+    # ---------------------------------------------------------------
+    Write-Section "Creating Removal Script"
+
+    $removeBatContent = @'
+<# : batch portion
+@echo off
+setlocal enabledelayedexpansion
+set "SCRIPT_PATH=%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ([System.IO.File]::ReadAllText('%~f0'))" %*
+exit /b
+: end batch / begin powershell #>
+
+$scriptver = '13.10.2026'
+$ProgressPreference = 'SilentlyContinue'
+$host.ui.RawUI.WindowTitle = 'WebView2 Runtime Removal ' + $scriptver
+
+function Write-Status {
+    param(
+        [string]$Label,
+        [string]$Value,
+        [string]$Color = "Cyan"
+    )
+    Write-Host ("{0,-22}: " -f $Label) -NoNewline -ForegroundColor Gray
+    Write-Host $Value -ForegroundColor $Color
+}
+
+function Write-Section {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host "--- $Title ---" -ForegroundColor DarkGray
+}
+
+# Check for Admin privileges
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Requesting Administrator privileges..." -ForegroundColor Yellow
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"iex ([System.IO.File]::ReadAllText('$($MyInvocation.MyCommand.Path)'))`"" -Verb RunAs
+    exit
+}
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor DarkCyan
+Write-Host "  WebView2 Runtime Removal" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor DarkCyan
+Write-Host ""
+
+# Get script path from batch environment variable
+$scriptPath = $env:SCRIPT_PATH.TrimEnd('\')
+$removeDir  = $scriptPath
+
+# ================================================================
+# Initial Confirmation Dialog
+# ================================================================
+
+Write-Host "========================================" -ForegroundColor DarkYellow
+Write-Host "  CONFIRM REMOVAL" -ForegroundColor Yellow
+Write-Host "========================================" -ForegroundColor DarkYellow
+Write-Host ""
+Write-Host "This will completely remove WebView2 Runtime from:" -ForegroundColor Yellow
+Write-Host "  $removeDir" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "The following will be deleted:" -ForegroundColor Yellow
+Write-Host "  • Portable folder" -ForegroundColor Gray
+Write-Host "  • Registry entries (pv, location)" -ForegroundColor Gray
+Write-Host "  • Group Policy settings" -ForegroundColor Gray
+Write-Host "  • Environment variables" -ForegroundColor Gray
+Write-Host ""
+Write-Host ""
+Write-Host "Options:" -ForegroundColor Gray
+Write-Host "  [Y] Yes  - Continue with removal" -ForegroundColor Green
+Write-Host "  [N] No   - Cancel and exit" -ForegroundColor Red
+Write-Host ""
+
+$confirmChoice = $null
+while ($confirmChoice -ne 'Y' -and $confirmChoice -ne 'N') {
+    $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    $confirmChoice = $key.Character.ToString().ToUpper()
+    
+    if ($confirmChoice -eq 'Y') {
+        Write-Host "Y" -ForegroundColor Green
+        Write-Host ""
+        break
+    } elseif ($confirmChoice -eq 'N') {
+        Write-Host "N" -ForegroundColor Red
+        Write-Host ""
+        Write-Status "Status" "Removal canceled by user" "Yellow"
+        Write-Host ""
+        exit 0
+    }
+}
+
+Write-Status "Portable Folder" $removeDir "Yellow"
+Write-Status "Status" "Preparing removal script..." "Yellow"
+Write-Host ""
+
+try {
+    # Generate unique temp file name
+    $guid = [guid]::NewGuid().ToString().Substring(0, 8)
+    $tempPsScript = Join-Path $env:TEMP "wv2_removal_$guid.ps1"
+    $tempBatScript = Join-Path $env:TEMP "wv2_removal_$guid.bat"
+
+    # Create comprehensive PowerShell cleanup script
+    $psCleanupCode = @"
+`$removeDir = '$removeDir'
+`$ProgressPreference = 'SilentlyContinue'
+
+function Write-Status {
+    param(
+        [string]`$Label,
+        [string]`$Value,
+        [string]`$Color = "Cyan"
+    )
+    Write-Host ("{0,-22}: " -f `$Label) -NoNewline -ForegroundColor Gray
+    Write-Host `$Value -ForegroundColor `$Color
+}
+
+function Write-Section {
+    param([string]`$Title)
+    Write-Host ""
+    Write-Host "--- `$Title ---" -ForegroundColor DarkGray
+}
+
+`$host.ui.RawUI.WindowTitle = 'WebView2 Cleanup' 
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor DarkRed
+Write-Host "  WebView2 Runtime Cleanup" -ForegroundColor Red
+Write-Host "========================================" -ForegroundColor DarkRed
+Write-Host ""
+Write-Status "Portable Folder" `$removeDir "Yellow"
+Write-Status "Status" "Running deferred cleanup..." "Yellow"
+Write-Host ""
+
+try {
+
+    # ================================================================
+    # Phase 1: Close all processes
+    # ================================================================
+
+    Write-Section "Closing WebView2 Processes"
+
+    `$procName = "msedgewebview2"
+    `$webviewProcs = Get-Process -Name `$procName -ErrorAction SilentlyContinue
+
+    if (-not `$webviewProcs -or `$webviewProcs.Count -eq 0) {
+        Write-Status "Processes" "None running" "Green"
+    } else {
+        Write-Status "Found" "`$(`$webviewProcs.Count) msedgewebview2 process(es)" "Yellow"
+
+        `$ownerExeNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        foreach (`$p in `$webviewProcs) {
+            try {
+                `$wmi = Get-WmiObject Win32_Process -Filter "ProcessId = `$(`$p.Id)" -ErrorAction SilentlyContinue
+                if (-not `$wmi) { continue }
+                `$cmdline = `$wmi.CommandLine
+                if (-not `$cmdline) { continue }
+                `$m = [regex]::Match(`$cmdline, '--webview-exe-name=([^\s"]+\.exe)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if (`$m.Success) {
+                    `$exeName = `$m.Groups[1].Value.Trim()
+                    `$ownerExeNames.Add(`$exeName) | Out-Null
+                    Write-Status "  Found arg" "PID `$(`$p.Id) -> `$exeName" "Yellow"
+                }
+            } catch { }
+        }
+
+        if (`$ownerExeNames.Count -gt 0) {
+            Write-Section "Closing Owner Processes"
+            foreach (`$exeName in `$ownerExeNames) {
+                `$baseName   = [IO.Path]::GetFileNameWithoutExtension(`$exeName)
+                `$ownerProcs = Get-Process -Name `$baseName -ErrorAction SilentlyContinue
+                if (`$ownerProcs -and `$ownerProcs.Count -gt 0) {
+                    Write-Status "  Closing" "`$exeName (`$(`$ownerProcs.Count) process(es))" "Yellow"
+                    foreach (`$op in `$ownerProcs) { try { `$op.CloseMainWindow() | Out-Null } catch { } }
+                    `$waited = 0
+                    while (`$waited -lt 5) {
+                        Start-Sleep -Seconds 1
+                        `$waited++
+                        `$still = Get-Process -Name `$baseName -ErrorAction SilentlyContinue
+                        if (-not `$still -or `$still.Count -eq 0) { break }
+                    }
+                    `$still = Get-Process -Name `$baseName -ErrorAction SilentlyContinue
+                    if (`$still -and `$still.Count -gt 0) {
+                        foreach (`$op in `$still) {
+                            try { `$op | Stop-Process -Force -ErrorAction SilentlyContinue
+                                Write-Status "  Force killed" "PID `$(`$op.Id)" "Red"
+                            } catch { }
+                        }
+                    }
+                }
+            }
+        }
+
+        Write-Section "Closing msedgewebview2 Processes"
+        `$webviewProcs = Get-Process -Name `$procName -ErrorAction SilentlyContinue
+        if (`$webviewProcs -and `$webviewProcs.Count -gt 0) {
+            Write-Status "Closing" "`$(`$webviewProcs.Count) process(es)" "Yellow"
+            foreach (`$p in `$webviewProcs) { try { `$p.CloseMainWindow() | Out-Null } catch { } }
+            `$waited = 0
+            while (`$waited -lt 5) {
+                Start-Sleep -Seconds 1
+                `$waited++
+                `$still = Get-Process -Name `$procName -ErrorAction SilentlyContinue
+                if (-not `$still -or `$still.Count -eq 0) { break }
+            }
+            `$still = Get-Process -Name `$procName -ErrorAction SilentlyContinue
+            if (`$still -and `$still.Count -gt 0) {
+                foreach (`$p in `$still) {
+                    try { `$p | Stop-Process -Force -ErrorAction SilentlyContinue
+                        Write-Status "  Force killed" "PID `$(`$p.Id)" "Red"
+                    } catch { }
+                }
+            }
+            Write-Status "Processes" "Closed" "Green"
+        }
+    }
+
+    # ================================================================
+    # Phase 2: Close Explorer windows
+    # ================================================================
+
+    Write-Section "Closing Explorer Windows"
+    
+    try {
+        `$shell = New-Object -ComObject Shell.Application -ErrorAction SilentlyContinue
+        if (`$shell) {
+            `$folder = [uri]`$removeDir
+            `$windowsClosed = 0
+            
+            Write-Status "Target Path"  `$removeDir  "Yellow"
+            
+            foreach (`$w in `$shell.Windows()) {
+                try {
+                    if (`$w.LocationURL -ieq `$folder.AbsoluteUri) {
+                        Write-Status "  Closing" "Explorer window: `$(`$w.LocationName)" "Yellow"
+                        `$w.Quit()
+                        `$windowsClosed++
+                    } else {
+                        `$wFolder = [uri]`$w.LocationURL
+                        if (`$wFolder.LocalPath -like "`$removeDir*") {
+                            Write-Status "  Closing" "Explorer window: `$(`$w.LocationName)" "Yellow"
+                            `$w.Quit()
+                            `$windowsClosed++
+                        }
+                    }
+                } catch {
+                }
+            }
+            
+            if (`$windowsClosed -gt 0) {
+                Write-Status "Windows Closed" "`$windowsClosed Explorer window(s)" "Green"
+                Start-Sleep -Seconds 1
+            } else {
+                Write-Status "Explorer Windows" "None showing target path" "Green"
+            }
+        } else {
+            Write-Status "Shell.Application" "Could not create COM object" "Yellow"
+        }
+    } catch {
+        Write-Status "Explorer Windows" "Warning: `$(`$_.Exception.Message)" "Yellow"
+    }
+
+    # ================================================================
+    # Phase 3: Remove Registry entries
+    # ================================================================
+
+    Write-Section "Registry - pv Value"
+    `$regPath = if ([Environment]::Is64BitOperatingSystem) {
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    } else {
+        "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    }
+
+    try {
+        `$pvExists = Get-ItemProperty -Path `$regPath -Name "pv" -ErrorAction SilentlyContinue
+        if (`$pvExists) {
+            Remove-ItemProperty -Path `$regPath -Name "pv" -Force -ErrorAction Stop
+            Write-Status "Registry pv" "Deleted" "Green"
+        } else {
+            Write-Status "Registry pv" "Not found - skipped" "Yellow"
+        }
+    } catch {
+        Write-Status "Registry pv" "Error: `$(`$_.Exception.Message)" "Red"
+    }
+
+    Write-Section "Registry - location Value"
+    try {
+        `$locExists = Get-ItemProperty -Path `$regPath -Name "location" -ErrorAction SilentlyContinue
+        if (`$locExists) {
+            Remove-ItemProperty -Path `$regPath -Name "location" -Force -ErrorAction Stop
+            Write-Status "Registry location" "Deleted" "Green"
+        } else {
+            Write-Status "Registry location" "Not found - skipped" "Yellow"
+        }
+    } catch {
+        Write-Status "Registry location" "Error: `$(`$_.Exception.Message)" "Red"
+    }
+
+    # ================================================================
+    # Phase 4: Remove Group Policy
+    # ================================================================
+
+    Write-Section "Group Policy - BrowserExecutableFolder"
+    `$policyFilePath  = "`$env:SystemRoot\System32\GroupPolicy\Machine\registry.pol"
+    `$policyKey       = "Software\Policies\Microsoft\Edge\WebView2\BrowserExecutableFolder"
+    `$policyValueName = "*"
+
+    try {
+        if (Get-Module -ListAvailable PolicyFileEditor -ErrorAction SilentlyContinue) {
+            Import-Module PolicyFileEditor -ErrorAction SilentlyContinue
+            if (Get-Module PolicyFileEditor) {
+                `$existing = Get-PolicyFileEntry -Path `$policyFilePath -Key `$policyKey -ValueName `$policyValueName -ErrorAction SilentlyContinue
+                if (`$existing) {
+                    Remove-PolicyFileEntry -Path `$policyFilePath -Key `$policyKey -ValueName `$policyValueName -ErrorAction SilentlyContinue
+                    Write-Status "Policy" "Deleted" "Green"
+                    Write-Status "GPUpdate" "Running..." "Yellow"
+                    Start-Process gpupdate.exe -ArgumentList "/force" -NoNewWindow -Wait
+                    Write-Status "GPUpdate" "Done" "Green"
+                } else {
+                    Write-Status "Policy" "Not found - skipped" "Yellow"
+                }
+            } else {
+                Write-Status "Policy" "PolicyFileEditor module load failed - skipped" "Yellow"
+            }
+        } else {
+            Write-Status "Policy" "PolicyFileEditor module not available - skipped" "Yellow"
+        }
+    } catch {
+        Write-Status "Policy" "Error: `$(`$_.Exception.Message)" "Yellow"
+    }
+
+    # ================================================================
+    # Phase 5: Remove Environment Variable
+    # ================================================================
+
+    Write-Section "System Environment Variable"
+    `$varName = "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"
+    try {
+        `$current = [System.Environment]::GetEnvironmentVariable(`$varName, [System.EnvironmentVariableTarget]::Machine)
+        if (`$current) {
+            [System.Environment]::SetEnvironmentVariable(`$varName, `$null, [System.EnvironmentVariableTarget]::Machine)
+            Write-Status "Environment Variable" "Deleted (was: `$current)" "Green"
+        } else {
+            Write-Status "Environment Variable" "Not found - skipped" "Yellow"
+        }
+    } catch {
+        Write-Status "Environment Variable" "Error: `$(`$_.Exception.Message)" "Red"
+    }
+
+    # ================================================================
+    # Phase 6: Delete folder
+    # ================================================================
+
+    Write-Section "File Removal"
+    Write-Status "Target Folder" `$removeDir "Yellow"
+    Write-Status "Status" "Waiting for all locks to release..." "Yellow"
+
+    `$maxRetries = 8
+    `$attempt = 0
+    `$folderDeleted = `$false
+
+    while (`$attempt -lt `$maxRetries) {
+        `$attempt++
+        try {
+            if (Test-Path `$removeDir) {
+                Remove-Item `$removeDir -Recurse -Force -ErrorAction Stop
+                Write-Status "Folder Deleted" `$removeDir "Green"
+                `$folderDeleted = `$true
+                break
+            } else {
+                Write-Status "Folder" "Already deleted" "Green"
+                `$folderDeleted = `$true
+                break
+            }
+        } catch {
+            if (`$attempt -lt `$maxRetries) {
+                `$remaining = `$maxRetries - `$attempt
+                Write-Status "Attempt `$attempt" "Failed - retrying in 3 seconds (`$remaining remaining)..." "Yellow"
+                Start-Sleep -Seconds 3
+            } else {
+                Write-Status "Error" "Could not delete after `$maxRetries attempts" "Red"
+                Write-Status "Details" "`$(`$_.Exception.Message)" "Yellow"
+                Write-Status "Manual Action" "Please manually delete: `$removeDir" "Yellow"
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor DarkGreen
+    Write-Host "  REMOVAL COMPLETE" -ForegroundColor Green
+    Write-Host "========================================" -ForegroundColor DarkGreen
+    Write-Host ""
+    Write-Status "WebView2 Processes" "Stopped" "Green"
+    Write-Status "Explorer Windows" "Closed" "Green"
+    Write-Status "Registry pv" "Removed" "Green"
+    Write-Status "Registry location" "Removed" "Green"
+    Write-Status "Group Policy" "Removed" "Green"
+    Write-Status "Environment Variable" "Removed" "Green"
+    if (`$folderDeleted) {
+        Write-Status "Portable Folder" "Deleted" "Green"
+    } else {
+        Write-Status "Portable Folder" "Failed - see above" "Red"
+    }
+    Write-Host "========================================" -ForegroundColor DarkGreen
+    Write-Host ""
+
+} catch {
+    Write-Host ""
+    Write-Status "FATAL ERROR" `$_.Exception.Message "Red"
+    Write-Host `$_.ScriptStackTrace -ForegroundColor DarkRed
+    Write-Host ""
+}
+
+Write-Host ""
+Write-Host "Press any key to close this window and complete cleanup..." -ForegroundColor Yellow
+`$null = `$Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+# Self-delete this script
+Start-Sleep -Seconds 2
+Remove-Item `$PSCommandPath -Force -ErrorAction SilentlyContinue
+
+# Delete the batch wrapper
+Remove-Item '$tempBatScript' -Force -ErrorAction SilentlyContinue
+"@
+
+    # Create batch wrapper script
+    $batCleanupCode = @"
+@echo off
+setlocal enabledelayedexpansion
+
+REM Change to TEMP directory as working directory
+cd /d "%TEMP%"
+
+REM Wait for current PowerShell process to exit
+timeout /t 3 /nobreak >nul 2>&1
+
+REM Run the PowerShell cleanup script in a new process
+powershell -NoProfile -ExecutionPolicy Bypass -File "$tempPsScript"
+
+REM Pause to show results
+pause
+
+REM Clean up self
+del /q "%~f0" >nul 2>&1
+"@
+
+    try {
+        # Write PowerShell cleanup script
+        [System.IO.File]::WriteAllText($tempPsScript, $psCleanupCode, [System.Text.Encoding]::UTF8)
+        Write-Status "Cleanup Script" "Created successfully" "Green"
+
+        # Write batch cleanup script
+        [System.IO.File]::WriteAllText($tempBatScript, $batCleanupCode, [System.Text.Encoding]::ASCII)
+        Write-Status "Batch Wrapper" "Created successfully" "Green"
+
+        Write-Host ""
+        Write-Host "========================================" -ForegroundColor DarkYellow
+        Write-Host "  TRANSFER TO CLEANUP" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor DarkYellow
+        Write-Host ""
+        Write-Status "Next Step" "Launching deferred cleanup process..." "Yellow"
+        Write-Host ""
+        Write-Host "This window will close. Full removal will continue in new window." -ForegroundColor Cyan
+        Write-Host ""
+
+        Start-Sleep -Seconds 2
+
+        # Launch batch cleanup script and exit current script
+        Start-Process -FilePath $tempBatScript
+
+        Start-Sleep -Seconds 1
+        exit 0
+
+    } catch {
+        Write-Status "Error" "Could not create cleanup scripts: $($_.Exception.Message)" "Red"
+        Write-Status "Manual Action Required" "Please manually delete: $removeDir" "Yellow"
+        Write-Host ""
+        pause
+    }
+
+}
+catch {
+    Write-Host ""
+    Write-Status "FATAL ERROR" $_.Exception.Message "Red"
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+    Write-Host ""
+    pause
+}
+'@
+
+    $removeBatPath = Join-Path $ptpath "Remove.bat"
+    
+    try {
+        Set-Content -Path $removeBatPath -Value $removeBatContent -Force
+        Write-Status "Remove.bat" "Created in $ptpath" "Green"
+    } catch {
+        Write-Status "Remove.bat" "Error creating: $($_.Exception.Message)" "Yellow"
+    }
     # ---------------------------------------------------------------
     # Summary
     # ---------------------------------------------------------------
