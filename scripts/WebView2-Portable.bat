@@ -967,10 +967,10 @@ Write-Host "This will completely remove WebView2 Runtime from:" -ForegroundColor
 Write-Host "  $removeDir" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "The following will be deleted:" -ForegroundColor Yellow
-Write-Host "  • Portable folder" -ForegroundColor Gray
-Write-Host "  • Registry entries (pv, location)" -ForegroundColor Gray
-Write-Host "  • Group Policy settings" -ForegroundColor Gray
-Write-Host "  • Environment variables" -ForegroundColor Gray
+Write-Host "  - Portable folder" -ForegroundColor Gray
+Write-Host "  - Registry entries (pv, location)" -ForegroundColor Gray
+Write-Host "  - Group Policy settings" -ForegroundColor Gray
+Write-Host "  - Environment variables" -ForegroundColor Gray
 Write-Host ""
 Write-Host ""
 Write-Host "Options:" -ForegroundColor Gray
