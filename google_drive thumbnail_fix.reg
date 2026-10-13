@@ -1,0 +1,54 @@
+Windows Registry Editor Version 5.00
+
+; ---------- Remove bad overrides (Google Drive etc.) ----------
+
+; PNG
+[-HKEY_CURRENT_USER\Software\Classes\.png\shellex\{E357FCCD-A995-4576-B01F-234630154E96}]
+[-HKEY_CLASSES_ROOT\.png\shellex\{E357FCCD-A995-4576-B01F-234630154E96}]
+
+; BMP
+[-HKEY_CURRENT_USER\Software\Classes\.bmp\shellex\{E357FCCD-A995-4576-B01F-234630154E96}]
+[-HKEY_CLASSES_ROOT\.bmp\shellex\{E357FCCD-A995-4576-B01F-234630154E96}]
+
+;-- redirect its broken thumbnail provider to the real Windows one  ----------
+
+[HKEY_CURRENT_USER\Software\Classes\CLSID\{8AD5CECD-DF0D-41C3-BA21-1E22114CC73C}\TreatAs]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+; Also set it system-wide (more reliable)
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{8AD5CECD-DF0D-41C3-BA21-1E22114CC73C}\TreatAs]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+; ---------- Restore correct Windows Photo Thumbnail Provider ----------
+
+; PNG
+[HKEY_CLASSES_ROOT\pngfile\shellex\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+[HKEY_CURRENT_USER\Software\Classes\pngfile\shellex\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+[HKEY_CLASSES_ROOT\SystemFileAssociations\.png\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+[HKEY_CURRENT_USER\Software\Classes\SystemFileAssociations\.png\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+[HKEY_CLASSES_ROOT\.png\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+; BMP
+[HKEY_CLASSES_ROOT\Paint.Picture\shellex\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+[HKEY_CURRENT_USER\Software\Classes\Paint.Picture\shellex\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+[HKEY_CLASSES_ROOT\SystemFileAssociations\.bmp\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+[HKEY_CURRENT_USER\Software\Classes\SystemFileAssociations\.bmp\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
+
+[HKEY_CLASSES_ROOT\.bmp\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}]
+@="{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
